@@ -1,0 +1,158 @@
+name: release app
+
+# Manual only: Actions → "release app" → Run workflow, then pick the platforms.
+# Runs here, in the public releases repo, because public repos get free Actions minutes (macOS
+# included). The code stays in the private invyte-digital/invyte-connect: it is checked out with
+# a read-only deploy key (secret CODE_DEPLOY_KEY). Builds the installers, signs the updates and
+# publishes them as a release of this repo, where installed apps look for updates. Each platform
+# adds its files and its entry in latest.json to the same release vX.Y.Z.
+#
+# Logs are public: never print a secret, never echo the environment.
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: Platforms to build
+        type: choice
+        options: [windows et mac, windows, mac]
+        default: windows et mac
+      notes:
+        description: Release notes shown to clients
+        required: false
+        default: ''
+      ref:
+        description: Branch or commit of invyte-digital/invyte-connect to build
+        required: false
+        default: main
+
+# Only collaborators can run a manual workflow; nothing here runs on pull requests.
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        shell: bash
+        run: |
+          win='{"name":"windows","runner":"windows-latest","triple":"x86_64-pc-windows-msvc","args":""}'
+          mac='{"name":"mac","runner":"macos-latest","triple":"aarch64-apple-darwin","args":"--target aarch64-apple-darwin --bundles app,dmg"}'
+          case "${{ inputs.platforms }}" in
+            windows) list="[$win]" ;;
+            mac) list="[$mac]" ;;
+            *) list="[$win,$mac]" ;;
+          esac
+          echo "matrix={\"include\":$list}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    # Apple's first notarization took hours; a normal build is ~20 min. Never burn 6 h again.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      # One at a time: both jobs write to the same release and latest.json.
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: invyte-digital/invyte-connect
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.CODE_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          repository: Vicfou-dev/mcp-whatsapp
+          path: vendor/mcp-whatsapp
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            mcp/package-lock.json
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: vendor/mcp-whatsapp/go.mod
+          cache-dependency-path: vendor/mcp-whatsapp/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+      # Rust is most of the build time: keep compiled dependencies between runs.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.triple }}
+          # Keep the compiled dependencies even if publishing fails afterwards.
+          cache-on-failure: true
+
+      - name: Install app dependencies
+        run: npm ci
+
+      - name: Build sidecars
+        shell: bash
+        env:
+          WHATSAPP_SRC: ${{ github.workspace }}/vendor/mcp-whatsapp
+        run: scripts/build-sidecars.sh ${{ matrix.triple }}
+
+      # Notarization: the App Store Connect API key, written to a file for the bundler.
+      - name: Apple API key
+        if: matrix.name == 'mac'
+        shell: bash
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/apple"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$RUNNER_TEMP/apple/AuthKey.p8"
+          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/apple/AuthKey.p8" >> "$GITHUB_ENV"
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Build, sign and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+          # Mac only (ignored on Windows): Developer ID signing and notarization.
+          APPLE_CERTIFICATE: ${{ matrix.name == 'mac' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ matrix.name == 'mac' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: "${{ matrix.name == 'mac' && 'Developer ID Application: INVYTE DIGITAL - FZCO (J543823XJV)' || '' }}"
+          APPLE_API_ISSUER: ${{ matrix.name == 'mac' && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_API_KEY: ${{ matrix.name == 'mac' && 'L58VNSMZ72' || '' }}
+        with:
+          tagName: v${{ steps.version.outputs.version }}
+          # The tag lives in this repo, so it points at this repo's main, not at the code commit.
+          releaseCommitish: main
+          releaseName: Invyte Connect ${{ steps.version.outputs.version }}
+          releaseBody: ${{ inputs.notes }}
+          releaseDraft: false
+          includeUpdaterJson: true
+          args: ${{ matrix.args }}
+
+  # Keep the two newest releases: the current one and one to fall back to.
+  prune:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete older releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release list -R invyte-digital/invyte-connect-releases --limit 100 --json tagName,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[2:] | .[].tagName' |
+          while read -r tag; do
+            gh release delete "$tag" -R invyte-digital/invyte-connect-releases --yes --cleanup-tag
+            echo "deleted $tag"
+          done
