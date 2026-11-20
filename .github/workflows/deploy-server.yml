@@ -42,3 +42,9 @@ jobs:
         run: npx wrangler d1 migrations apply invyte-connect --remote
       - name: Deploy Worker
         run: npx wrangler deploy
+      # Worker secrets kept as GitHub secrets of this repo; skipped while not set.
+      - name: LinkedIn client secret
+        env:
+          LINKEDIN_CLIENT_SECRET: ${{ secrets.LINKEDIN_CLIENT_SECRET }}
+        if: env.LINKEDIN_CLIENT_SECRET != ''
+        run: printf '%s' "$LINKEDIN_CLIENT_SECRET" | npx wrangler secret put LINKEDIN_CLIENT_SECRET
