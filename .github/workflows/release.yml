@@ -150,8 +150,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release list -R invyte-digital/invyte-connect-releases --limit 100 --json tagName,createdAt \
-            --jq 'sort_by(.createdAt) | reverse | .[2:] | .[].tagName' |
+          # Sorted by version number: GitHub dates a release by its tag's commit, not by when it
+          # was published, so every release here shares the same date.
+          gh release list -R invyte-digital/invyte-connect-releases --limit 100 --json tagName \
+            --jq 'map(select(.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))) | sort_by(.tagName | ltrimstr("v") | split(".") | map(tonumber)) | reverse | .[2:] | .[].tagName' |
           while read -r tag; do
             gh release delete "$tag" -R invyte-digital/invyte-connect-releases --yes --cleanup-tag
             echo "deleted $tag"
