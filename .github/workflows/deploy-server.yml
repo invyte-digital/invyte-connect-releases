@@ -38,6 +38,22 @@ jobs:
           cache-dependency-path: server/package-lock.json
       - run: npm ci
       - run: npx tsc --noEmit
+      # Rights of the shared memory and documents, on a local D1 built from today's data shape.
+      # Runs offline; a failure stops the deploy before production is touched.
+      - name: Memory and documents test (local)
+        if: hashFiles('server/test/run-memory.sh') != ''
+        run: npm run test:memory
+      # Semantic search index, created once (1024 dimensions for bge-m3, filtered by scope and kind).
+      - name: Knowledge index (Vectorize)
+        if: hashFiles('server/src/vectors.ts') != ''
+        run: |
+          if npx wrangler vectorize get invyte-knowledge-bge-m3 >/dev/null 2>&1; then
+            echo "index present"
+          else
+            npx wrangler vectorize create invyte-knowledge-bge-m3 --dimensions=1024 --metric=cosine
+            npx wrangler vectorize create-metadata-index invyte-knowledge-bge-m3 --property-name=scope --type=string
+            npx wrangler vectorize create-metadata-index invyte-knowledge-bge-m3 --property-name=kind --type=string
+          fi
       - name: Apply D1 migrations
         run: npx wrangler d1 migrations apply invyte-connect --remote
       - name: Deploy Worker
