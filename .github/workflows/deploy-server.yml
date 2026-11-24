@@ -62,7 +62,8 @@ jobs:
           fi
       - name: Without the index
         if: steps.knowledge.outputs.present == 'false'
-        run: sed -i '/"vectorize": \[/d' wrangler.jsonc
+        run: |
+          sed -i '/"vectorize": \[/d' wrangler.jsonc
       - name: Apply D1 migrations
         run: npx wrangler d1 migrations apply invyte-connect --remote
       - name: Deploy Worker
