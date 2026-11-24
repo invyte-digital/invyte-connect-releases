@@ -44,16 +44,25 @@ jobs:
         if: hashFiles('server/test/run-memory.sh') != ''
         run: npm run test:memory
       # Semantic search index, created once (1024 dimensions for bge-m3, filtered by scope and kind).
+      # If the API token cannot manage Vectorize yet, the Worker is deployed without the index:
+      # search stays keyword-only until the token gets "Vectorize: Edit" and this runs again.
       - name: Knowledge index (Vectorize)
+        id: knowledge
         if: hashFiles('server/src/vectors.ts') != ''
         run: |
           if npx wrangler vectorize get invyte-knowledge-bge-m3 >/dev/null 2>&1; then
-            echo "index present"
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          elif npx wrangler vectorize create invyte-knowledge-bge-m3 --dimensions=1024 --metric=cosine \
+            && npx wrangler vectorize create-metadata-index invyte-knowledge-bge-m3 --property-name=scope --type=string \
+            && npx wrangler vectorize create-metadata-index invyte-knowledge-bge-m3 --property-name=kind --type=string; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
           else
-            npx wrangler vectorize create invyte-knowledge-bge-m3 --dimensions=1024 --metric=cosine
-            npx wrangler vectorize create-metadata-index invyte-knowledge-bge-m3 --property-name=scope --type=string
-            npx wrangler vectorize create-metadata-index invyte-knowledge-bge-m3 --property-name=kind --type=string
+            echo "::warning::Vectorize unavailable for this API token: deploying with keyword search only."
+            echo "present=false" >> "$GITHUB_OUTPUT"
           fi
+      - name: Without the index
+        if: steps.knowledge.outputs.present == 'false'
+        run: sed -i '/"vectorize": \[/d' wrangler.jsonc
       - name: Apply D1 migrations
         run: npx wrangler d1 migrations apply invyte-connect --remote
       - name: Deploy Worker
