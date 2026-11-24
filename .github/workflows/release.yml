@@ -24,6 +24,10 @@ on:
         description: Branch or commit of invyte-digital/invyte-connect to build
         required: false
         default: main
+      test:
+        description: Test build only (installers kept as a run artifact for 3 days, nothing published)
+        type: boolean
+        default: false
 
 # Only collaborators can run a manual workflow; nothing here runs on pull requests.
 permissions:
@@ -119,7 +123,26 @@ jobs:
         shell: bash
         run: echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_OUTPUT"
 
+      - name: Build only (test)
+        if: inputs.test
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+        run: npx tauri build ${{ matrix.args }}
+
+      - name: Keep the test installers
+        if: inputs.test
+        uses: actions/upload-artifact@v4
+        with:
+          name: invyte-connect-${{ matrix.name }}-test
+          retention-days: 3
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/*/release/bundle/dmg/*.dmg
+
       - name: Build, sign and publish
+        if: ${{ !inputs.test }}
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -144,6 +167,7 @@ jobs:
   # Keep the two newest releases: the current one and one to fall back to.
   prune:
     needs: build
+    if: ${{ !inputs.test }}
     runs-on: ubuntu-latest
     steps:
       - name: Delete older releases
