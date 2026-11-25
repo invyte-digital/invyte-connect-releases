@@ -65,7 +65,13 @@ jobs:
               echo "exclusion route $p: $(echo "$r" | jq -r '.success') $(echo "$r" | errors)"
             fi
           done
-          sleep 8
+          # Certificate by HTTP validation: the CNAME already points at Cloudflare, so it validates
+          # by itself, with no TXT value to copy (TXT values rotate while pending).
+          if [ "$(api "$base/zones/$ZONE/custom_hostnames/$id" | jq -r '.result.ssl.method')" != "http" ]; then
+            r=$(api -X PATCH "$base/zones/$ZONE/custom_hostnames/$id" -d '{"ssl":{"method":"http","type":"dv","settings":{"min_tls_version":"1.2"}}}')
+            echo "ssl method http: $(echo "$r" | jq -r '.success') $(echo "$r" | errors)"
+          fi
+          sleep 20
           d=$(api "$base/zones/$ZONE/custom_hostnames/$id")
           echo "status: $(echo "$d" | jq -r '.result.status')  ssl: $(echo "$d" | jq -r '.result.ssl.status')"
           echo "::group::Records to add in the cPanel zone editor of invytedigital.com"
