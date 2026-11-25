@@ -54,6 +54,17 @@ jobs:
             id=$(echo "$r" | jq -r '.result.id // empty')
           fi
           [ -z "$id" ] && exit 1
+          # Custom hostnames reach the Worker through a "*/*" route (set by wrangler.jsonc). The
+          # zone's own site must not: routes without a Worker on its names take precedence.
+          routes=$(api "$base/zones/$ZONE/workers/routes")
+          for p in "$ZONE_NAME/*" "*.$ZONE_NAME/*"; do
+            if echo "$routes" | jq -e --arg p "$p" '.result[] | select(.pattern == $p)' >/dev/null; then
+              echo "exclusion route present: $p"
+            else
+              r=$(api -X POST "$base/zones/$ZONE/workers/routes" -d "{\"pattern\":\"$p\"}")
+              echo "exclusion route $p: $(echo "$r" | jq -r '.success') $(echo "$r" | errors)"
+            fi
+          done
           sleep 8
           d=$(api "$base/zones/$ZONE/custom_hostnames/$id")
           echo "status: $(echo "$d" | jq -r '.result.status')  ssl: $(echo "$d" | jq -r '.result.ssl.status')"
