@@ -1,0 +1,64 @@
+name: connect domain
+
+# Manual only. Serves connect.invytedigital.com from Cloudflare without moving invytedigital.com
+# (its DNS and mail stay at o2switch): a Cloudflare for SaaS custom hostname on a zone of the
+# Invyte account (the "support" zone, invisible to visitors). Prints the records to add in
+# o2switch's cPanel zone editor. Logs are public: never print a secret.
+on:
+  workflow_dispatch:
+    inputs:
+      hostname:
+        description: Name visitors use
+        default: connect.invytedigital.com
+      zone:
+        description: Zone of the Invyte Cloudflare account that hosts it (invisible)
+        default: uaelead.com
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      HOST: ${{ inputs.hostname }}
+      ZONE_NAME: ${{ inputs.zone }}
+    steps:
+      - name: Custom hostname
+        shell: bash
+        run: |
+          set -u
+          api() { curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" "$@"; }
+          errors() { jq -r '[.errors[]? | "\(.code): \(.message)"] | join(" | ")'; }
+          base=https://api.cloudflare.com/client/v4
+          z=$(api "$base/zones?name=$ZONE_NAME")
+          ZONE=$(echo "$z" | jq -r '.result[0].id // empty')
+          if [ -z "$ZONE" ]; then echo "::error::$ZONE_NAME not reachable with this token: $(echo "$z" | errors)"; exit 1; fi
+          echo "zone $ZONE_NAME found, plan: $(echo "$z" | jq -r '.result[0].plan.name')"
+          ORIGIN="saas-origin.$ZONE_NAME"
+          # Fallback origin: a proxied placeholder record; the Worker route answers in front of it.
+          if [ "$(api "$base/zones/$ZONE/dns_records?name=$ORIGIN" | jq '.result | length')" = "0" ]; then
+            r=$(api -X POST "$base/zones/$ZONE/dns_records" -d "{\"type\":\"AAAA\",\"name\":\"$ORIGIN\",\"content\":\"100::\",\"proxied\":true,\"comment\":\"Invyte Connect custom hostnames\"}")
+            echo "origin record: $(echo "$r" | jq -r '.success') $(echo "$r" | errors)"
+          else
+            echo "origin record present"
+          fi
+          r=$(api -X PUT "$base/zones/$ZONE/custom_hostnames/fallback_origin" -d "{\"origin\":\"$ORIGIN\"}")
+          echo "fallback origin: $(echo "$r" | jq -r '.success') $(echo "$r" | errors)"
+          id=$(api "$base/zones/$ZONE/custom_hostnames?hostname=$HOST" | jq -r '.result[0].id // empty')
+          if [ -z "$id" ]; then
+            r=$(api -X POST "$base/zones/$ZONE/custom_hostnames" -d "{\"hostname\":\"$HOST\",\"ssl\":{\"method\":\"txt\",\"type\":\"dv\",\"settings\":{\"min_tls_version\":\"1.2\"}}}")
+            echo "custom hostname: $(echo "$r" | jq -r '.success') $(echo "$r" | errors)"
+            id=$(echo "$r" | jq -r '.result.id // empty')
+          fi
+          [ -z "$id" ] && exit 1
+          sleep 8
+          d=$(api "$base/zones/$ZONE/custom_hostnames/$id")
+          echo "status: $(echo "$d" | jq -r '.result.status')  ssl: $(echo "$d" | jq -r '.result.ssl.status')"
+          echo "::group::Records to add in the cPanel zone editor of invytedigital.com"
+          echo "CNAME  ${HOST%%.invytedigital.com}  ->  $ORIGIN"
+          echo "$d" | jq -r '.result.ownership_verification | select(.) | "TXT    \(.name)  ->  \(.value)"'
+          echo "$d" | jq -r '.result.ssl.validation_records[]? | select(.txt_name) | "TXT    \(.txt_name)  ->  \(.txt_value)"'
+          echo "::endgroup::"
