@@ -105,6 +105,9 @@ jobs:
         shell: bash
         env:
           WHATSAPP_SRC: ${{ github.workspace }}/vendor/mcp-whatsapp
+          # Telegram app credentials (my.telegram.org), baked into the sidecar at build time.
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
         run: scripts/build-sidecars.sh ${{ matrix.triple }}
 
       # Notarization: the App Store Connect API key, written to a file for the bundler.
